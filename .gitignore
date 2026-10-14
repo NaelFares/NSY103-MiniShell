@@ -1,0 +1,6 @@
+build/
+bin/
+*.dat
+*.dat.lock
+*.dat.tmp.*
+__pycache__/
