@@ -1,0 +1,11 @@
+# Detection automatique des fichiers texte par Git.
+* text=auto
+
+# On garde les fins de ligne Linux pour partager le projet entre Windows et Linux.
+*.c text eol=lf
+*.h text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+Makefile text eol=lf

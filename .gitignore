@@ -1,0 +1,9 @@
+# Fichiers produits par la compilation.
+build/
+bin/
+
+# Disques virtuels crees pendant l'utilisation.
+*.dat
+
+# Le rapport est remis separement des sources.
+*.pdf
