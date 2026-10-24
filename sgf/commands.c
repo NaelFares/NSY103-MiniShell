@@ -215,6 +215,20 @@ static int dir_add(Sgf *fs, uint32_t dir, const char *name, uint32_t child) {
     return -1;
 }
 
+/* On retire le nom du repertoire, sans liberer ici les donnees du fichier. */
+static int dir_remove(Sgf *fs, uint32_t dir, const char *name) {
+    unsigned char entries[DIR_COUNT * 64];
+    if (directory(fs, dir, entries) < 0)
+        return -1;
+    for (unsigned i = 0; i < DIR_COUNT; ++i)
+        if (disk_get(entries + i * 64) && !strcmp((char *)entries + i * 64 + 4, name)) {
+            memset(entries + i * 64, 0, 64);
+            return file_write(fs, dir, entries, sizeof entries);
+        }
+    errno = ENOENT;
+    return -1;
+}
+
 /* On cree l'inode, puis on l'ajoute dans son repertoire parent. */
 static int create_node(Sgf *fs, const char *path, uint32_t kind, uint32_t *id) {
     char name[60];
@@ -319,6 +333,127 @@ static int execute(Sgf *fs, int argc, char **v, int redirect, Output *o, int *di
         return create_node(fs, v[1], KIND_DIR, &id);
     }
 
+    /* cat recupere le contenu texte du fichier. */
+    if (!strcmp(cmd, "cat") && argc == 2) {
+        if (resolve(fs, v[1], &id) < 0)
+            return -1;
+        if (disk_get(inode(fs, id)) != KIND_FILE) {
+            errno = EISDIR;
+            return -1;
+        }
+        size_t len = disk_get(inode(fs, id) + 4);
+        unsigned char data[FILE_MAX + 1];
+        if (file_read(fs, id, data, FILE_MAX) < 0)
+            return -1;
+        if (memchr(data, 0, len)) {
+            errno = EILSEQ;
+            return -1;
+        }
+        data[len] = 0;
+        return add_text(o, (char *)data);
+    }
+
+    /* echo "texte" > fichier cree le fichier ou remplace son contenu. */
+    if (!strcmp(cmd, "echo") && argc == 4 && redirect == 2) {
+        *dirty = 1;
+        if (resolve(fs, v[3], &id) < 0) {
+            if (errno != ENOENT || create_node(fs, v[3], KIND_FILE, &id) < 0)
+                return -1;
+        }
+        if (disk_get(inode(fs, id)) != KIND_FILE) {
+            errno = EISDIR;
+            return -1;
+        }
+        unsigned char data[COMMAND_MAX];
+        size_t length = strlen(v[1]);
+        if (length + 1 > sizeof data || length + 1 > FILE_MAX) {
+            errno = EFBIG;
+            return -1;
+        }
+        memcpy(data, v[1], length);
+        data[length] = '\n';
+        return file_write(fs, id, data, length + 1);
+    }
+
+    /* On refuse de supprimer un repertoire non vide ou utilise par le chemin courant. */
+    if ((!strcmp(cmd, "rm") || !strcmp(cmd, "rmdir")) && argc == 2) {
+        *dirty = 1;
+        char name[60];
+        uint32_t parent;
+        if (resolve(fs, v[1], &id) < 0 || parent_name(fs, v[1], &parent, name) < 0)
+            return -1;
+        uint32_t kind = disk_get(inode(fs, id));
+        if (!strcmp(cmd, "rm") && kind == KIND_DIR) {
+            errno = EISDIR;
+            return -1;
+        }
+        if (!strcmp(cmd, "rmdir")) {
+            unsigned char entries[DIR_COUNT * 64];
+            if (directory(fs, id, entries) < 0)
+                return -1;
+            for (unsigned i = 0; i < DIR_COUNT; ++i)
+                if (disk_get(entries + i * 64)) {
+                    errno = ENOTEMPTY;
+                    return -1;
+                }
+            uint32_t p = fs->cwd;
+            for (;;) {
+                if (p == id) {
+                    errno = EBUSY;
+                    return -1;
+                }
+                if (!p)
+                    break;
+                p = disk_get(inode(fs, p) + 8);
+            }
+        }
+        if (dir_remove(fs, parent, name) < 0)
+            return -1;
+        inode_free(fs, id);
+        return 0;
+    }
+
+    /* cp et mv refusent d'ecraser un nom deja present. */
+    if ((!strcmp(cmd, "cp") || !strcmp(cmd, "mv")) && argc == 3) {
+        *dirty = 1;
+        char oldname[60], name[60];
+        uint32_t parent, oldparent, other;
+        if (resolve(fs, v[1], &id) < 0 || parent_name(fs, v[1], &oldparent, oldname) < 0 ||
+            parent_name(fs, v[2], &parent, name) < 0)
+            return -1;
+        if (find(fs, parent, name, &other) == 0) {
+            errno = EEXIST;
+            return -1;
+        }
+        if (errno != ENOENT)
+            return -1;
+        if (!strcmp(cmd, "cp")) {
+            if (disk_get(inode(fs, id)) != KIND_FILE) {
+                errno = EISDIR;
+                return -1;
+            }
+            unsigned char data[FILE_MAX];
+            size_t len = disk_get(inode(fs, id) + 4);
+            if (file_read(fs, id, data, sizeof data) < 0 ||
+                create_node(fs, v[2], KIND_FILE, &other) < 0)
+                return -1;
+            return file_write(fs, other, data, len);
+        }
+        uint32_t p = parent;
+        for (;;) {
+            if (p == id) {
+                errno = EINVAL;
+                return -1;
+            }
+            if (!p)
+                break;
+            p = disk_get(inode(fs, p) + 8);
+        }
+        if (dir_remove(fs, oldparent, oldname) < 0 || dir_add(fs, parent, name, id) < 0)
+            return -1;
+        disk_put(inode(fs, id) + 8, parent);
+        return 0;
+    }
     errno = EINVAL;
     return -1;
 }
