@@ -256,6 +256,46 @@ static int create_node(Sgf *fs, const char *path, uint32_t kind, uint32_t *id) {
     return dir_add(fs, parent, name, *id);
 }
 
+/* Reconstruction du chemin courant en remontant les repertoires parents. */
+static int print_path(Sgf *fs, Output *o) {
+    char path[COMMAND_MAX];
+    size_t pos = sizeof path - 1;
+    path[pos] = 0;
+    uint32_t current = fs->cwd;
+    unsigned depth = 0;
+    while (current != 0) {
+        if (++depth >= INODE_COUNT) {
+            errno = EINVAL;
+            return -1;
+        }
+        uint32_t parent = disk_get(inode(fs, current) + 8);
+        unsigned char entries[DIR_COUNT * 64];
+        if (directory(fs, parent, entries) < 0)
+            return -1;
+        unsigned i;
+        for (i = 0; i < DIR_COUNT; ++i)
+            if (disk_get(entries + i * 64) == current)
+                break;
+        if (i == DIR_COUNT) {
+            errno = ENOENT;
+            return -1;
+        }
+        const char *name = (char *)entries + i * 64 + 4;
+        size_t length = strlen(name);
+        if (length + 1 > pos) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        pos -= length;
+        memcpy(path + pos, name, length);
+        path[--pos] = '/';
+        current = parent;
+    }
+    if (add_text(o, fs->cwd == 0 ? "/" : path + pos) < 0)
+        return -1;
+    return add_text(o, "\n");
+}
+
 /* On choisit le traitement selon la commande et son nombre d'arguments. */
 static int execute(Sgf *fs, int argc, char **v, int redirect, Output *o, int *dirty) {
     if (!argc)
@@ -266,6 +306,10 @@ static int execute(Sgf *fs, int argc, char **v, int redirect, Output *o, int *di
         errno = EINVAL;
         return -1;
     }
+
+    /* pwd affiche le chemin absolu du repertoire courant du disque virtuel. */
+    if (!strcmp(cmd, "pwd") && argc == 1)
+        return print_path(fs, o);
 
     /* cd change le repertoire courant. */
     if (!strcmp(cmd, "cd") && argc <= 2) {

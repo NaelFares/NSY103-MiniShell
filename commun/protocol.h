@@ -5,7 +5,8 @@
 
 #include <stddef.h>
 
-#define COMMAND_MAX 4096u
+/* Une commande peut contenir assez de texte pour depasser les huit blocs directs. */
+#define COMMAND_MAX 8192u
 #define OUTPUT_MAX 131072u
 /* Envoi du resultat et de la longueur du texte, puis du texte. */
 int frame_send(int fd, const char *text, int status);
