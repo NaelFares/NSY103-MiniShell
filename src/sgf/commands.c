@@ -109,6 +109,7 @@ static int dir_remove(Sgf *fs,uint32_t dir,const char *name) {
 }
 static int create_node(Sgf *fs,const char *path,uint32_t kind,uint32_t *id) {
     char name[60]; uint32_t parent,existing;
+    if(kind==KIND_FILE && *path && path[strlen(path)-1]=='/') { errno=ENOTDIR; return -1; }
     if(parent_name(fs,path,&parent,name)<0) return -1;
     if(find(fs,parent,name,&existing)==0) { errno=EEXIST; return -1; }
     if(errno!=ENOENT) return -1;
@@ -201,7 +202,7 @@ static int execute(Sgf *fs,int argc,char **v,Output *o,int *dirty) {
     }
     if((!strcmp(cmd,"rm") || !strcmp(cmd,"rmdir")) && argc==2) {
         *dirty=1; char name[60]; uint32_t parent;
-        if(parent_name(fs,v[1],&parent,name)<0 || find(fs,parent,name,&id)<0) return -1;
+        if(resolve(fs,v[1],&id)<0 || parent_name(fs,v[1],&parent,name)<0) return -1;
         uint32_t kind=disk_get(inode(fs,id));
         if(!strcmp(cmd,"rm") && kind==KIND_DIR) { errno=EISDIR; return -1; }
         if(!strcmp(cmd,"rmdir")) {
@@ -215,7 +216,7 @@ static int execute(Sgf *fs,int argc,char **v,Output *o,int *dirty) {
     }
     if((!strcmp(cmd,"cp") || !strcmp(cmd,"mv")) && argc==3) {
         *dirty=1; char oldname[60],name[60]; uint32_t parent,oldparent,other;
-        if(parent_name(fs,v[1],&oldparent,oldname)<0 || find(fs,oldparent,oldname,&id)<0 ||
+        if(resolve(fs,v[1],&id)<0 || parent_name(fs,v[1],&oldparent,oldname)<0 ||
            parent_name(fs,v[2],&parent,name)<0) return -1;
         if(find(fs,parent,name,&other)==0) { errno=EEXIST; return -1; }
         if(errno!=ENOENT) return -1;

@@ -1,0 +1,11 @@
+name: Compilation Linux
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  compilation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compiler le projet
+        run: make
