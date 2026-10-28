@@ -12,7 +12,15 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-/* On lance le Noyau, puis on transmet les commandes jusqu'a Ctrl+D. */
+static volatile sig_atomic_t stopped = 0;
+
+/* On signale l'arret ; le nettoyage sera fait dans la boucle principale. */
+static void stop(int sig) {
+    (void)sig;
+    stopped = 1;
+}
+
+/* On lance le Noyau, puis on transmet les commandes jusqu'a Ctrl+D ou Ctrl+C. */
 int main(int argc, char **argv) {
     const char *disk = "disque.dat";
     int create = 0;
@@ -30,6 +38,11 @@ int main(int argc, char **argv) {
         }
     }
     signal(SIGPIPE, SIG_IGN);
+    struct sigaction action = {0};
+    action.sa_handler = stop;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGINT, &action, NULL);
+    sigaction(SIGTERM, &action, NULL);
     int queue = display_connect(key);
     if (queue < 0) {
         fprintf(stderr, "Lancez Ecran avant le Shell (cle %ld) : %s\n", (long)key, strerror(errno));
@@ -92,22 +105,32 @@ int main(int argc, char **argv) {
         result = 1;
         goto cleanup;
     }
-    fprintf(stderr, "Mon D.O.S. : Ctrl+D pour terminer.\n");
+    fprintf(stderr, "Mon D.O.S. : Ctrl+D ou Ctrl+C pour terminer.\n");
 
     /* On lit une commande, on attend sa reponse, puis on l'envoie a Ecran. */
-    for (;;) {
+    while (!stopped) {
         if (isatty(STDIN_FILENO)) {
             fputs("MonDOS> ", stderr);
             fflush(stderr);
         }
         const char *command = line;
         if (!fgets(line, sizeof line, stdin)) {
-            if (ferror(stdin)) {
+            if (ferror(stdin) && !stopped) {
                 perror("Lecture commande");
                 result = 1;
             }
             break;
         } else {
+            /* Une ligne trop longue est rejetee en entier. */
+            size_t length = strlen(line);
+            if (length == sizeof line - 1 && line[length - 1] != '\n') {
+                int c;
+                while ((c = getchar()) != '\n' && c != EOF && !stopped) {}
+                if (display_send(queue, "Erreur : commande trop longue\n", 0) < 0)
+                    break;
+                result = 1;
+                continue;
+            }
             size_t i = 0;
             while (line[i] == ' ' || line[i] == '\t' || line[i] == '\r' || line[i] == '\n')
                 ++i;
@@ -146,5 +169,5 @@ cleanup:
         perror("Fin affichage");
         result = 1;
     }
-    return result;
+    return stopped ? 128 + SIGINT : result;
 }
