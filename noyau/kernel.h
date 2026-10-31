@@ -3,6 +3,6 @@
 #ifndef KERNEL_H
 #define KERNEL_H
 
-int kernel_run(int requests, int responses, const char *disk, int create);
+int kernel_run(int requests, int responses, const char *disk, int create, unsigned user_id);
 
 #endif

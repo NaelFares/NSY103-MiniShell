@@ -18,13 +18,16 @@ bin build:
 	mkdir -p $@
 
 # On rassemble le stockage et les commandes dans la bibliotheque SGF.
-build/libsgf.a: build/storage.o build/commands.o
+build/libsgf.a: build/storage.o build/functions.o build/commands.o
 	$(AR) rcs $@ $^
 
 build/storage.o: sgf/storage.c $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 build/commands.o: sgf/commands.c $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+build/functions.o: sgf/functions.c $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 # Le Shell contient aussi le code du Noyau, execute par son fils.

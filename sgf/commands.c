@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "protocol.h"
 
 typedef struct {
@@ -89,173 +90,6 @@ static int parse(const char *line, char *buffer, char **args, int limit, int *re
     return count;
 }
 
-/* On verifie que l'inode est un repertoire avant de lire ses entrees. */
-static int directory(Sgf *fs, uint32_t id, unsigned char *data) {
-    if (disk_get(inode(fs, id)) != KIND_DIR) {
-        errno = ENOTDIR;
-        return -1;
-    }
-    return file_read(fs, id, data, DIR_COUNT * 64);
-}
-
-/* On cherche un nom parmi les entrees du repertoire. */
-static int find(Sgf *fs, uint32_t dir, const char *name, uint32_t *id) {
-    unsigned char entries[DIR_COUNT * 64];
-    if (directory(fs, dir, entries) < 0)
-        return -1;
-    for (unsigned i = 0; i < DIR_COUNT; ++i)
-        if (disk_get(entries + i * 64) && !strcmp((char *)entries + i * 64 + 4, name)) {
-            *id = disk_get(entries + i * 64);
-            return 0;
-        }
-    errno = ENOENT;
-    return -1;
-}
-
-/* On suit le chemin dossier par dossier, avec la gestion de . et .. */
-static int resolve(Sgf *fs, const char *path, uint32_t *id) {
-    if (!*path || strlen(path) >= COMMAND_MAX) {
-        errno = EINVAL;
-        return -1;
-    }
-    uint32_t current = *path == '/' ? 0 : fs->cwd;
-    const char *p = path;
-    while (*p) {
-        while (*p == '/')
-            ++p;
-        if (!*p)
-            break;
-        if (disk_get(inode(fs, current)) != KIND_DIR) {
-            errno = ENOTDIR;
-            return -1;
-        }
-        const char *start = p;
-        while (*p && *p != '/')
-            ++p;
-        size_t n = (size_t)(p - start);
-        if (n > NAME_MAX_BYTES) {
-            errno = ENAMETOOLONG;
-            return -1;
-        }
-        char name[60];
-        memcpy(name, start, n);
-        name[n] = 0;
-        if (!strcmp(name, "."))
-            continue;
-        if (!strcmp(name, ".."))
-            current = disk_get(inode(fs, current) + 8);
-        else if (find(fs, current, name, &current) < 0)
-            return -1;
-    }
-    if (path[strlen(path) - 1] == '/' && disk_get(inode(fs, current)) != KIND_DIR) {
-        errno = ENOTDIR;
-        return -1;
-    }
-    *id = current;
-    return 0;
-}
-
-/* On separe le nom final du chemin de son repertoire parent. */
-static int parent_name(Sgf *fs, const char *path, uint32_t *parent, char *name) {
-    size_t n = strlen(path);
-    if (!n || n >= COMMAND_MAX) {
-        errno = EINVAL;
-        return -1;
-    }
-    char copy[COMMAND_MAX];
-    memcpy(copy, path, n + 1);
-    while (n > 1 && copy[n - 1] == '/')
-        copy[--n] = 0;
-    char *slash = strrchr(copy, '/'), *base = slash ? slash + 1 : copy;
-    if (!*base || !strcmp(base, ".") || !strcmp(base, "..")) {
-        errno = EINVAL;
-        return -1;
-    }
-    if (strlen(base) > NAME_MAX_BYTES) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-    strcpy(name, base);
-    if (!slash)
-        *parent = fs->cwd;
-    else {
-        if (slash == copy)
-            slash[1] = 0;
-        else
-            *slash = 0;
-        if (resolve(fs, copy, parent) < 0)
-            return -1;
-    }
-    if (disk_get(inode(fs, *parent)) != KIND_DIR) {
-        errno = ENOTDIR;
-        return -1;
-    }
-    return 0;
-}
-
-/* On ajoute le nom et le numero d'inode dans une entree libre. */
-static int dir_add(Sgf *fs, uint32_t dir, const char *name, uint32_t child) {
-    unsigned char entries[DIR_COUNT * 64];
-    if (directory(fs, dir, entries) < 0)
-        return -1;
-    for (unsigned i = 0; i < DIR_COUNT; ++i)
-        if (disk_get(entries + i * 64) && !strcmp((char *)entries + i * 64 + 4, name)) {
-            errno = EEXIST;
-            return -1;
-        }
-    for (unsigned i = 0; i < DIR_COUNT; ++i)
-        if (!disk_get(entries + i * 64)) {
-            unsigned char *e = entries + i * 64;
-            memset(e, 0, 64);
-            disk_put(e, child);
-            strcpy((char *)e + 4, name);
-            return file_write(fs, dir, entries, sizeof entries);
-        }
-    errno = ENOSPC;
-    return -1;
-}
-
-/* On retire le nom du repertoire, sans liberer ici les donnees du fichier. */
-static int dir_remove(Sgf *fs, uint32_t dir, const char *name) {
-    unsigned char entries[DIR_COUNT * 64];
-    if (directory(fs, dir, entries) < 0)
-        return -1;
-    for (unsigned i = 0; i < DIR_COUNT; ++i)
-        if (disk_get(entries + i * 64) && !strcmp((char *)entries + i * 64 + 4, name)) {
-            memset(entries + i * 64, 0, 64);
-            return file_write(fs, dir, entries, sizeof entries);
-        }
-    errno = ENOENT;
-    return -1;
-}
-
-/* On cree l'inode, puis on l'ajoute dans son repertoire parent. */
-static int create_node(Sgf *fs, const char *path, uint32_t kind, uint32_t *id) {
-    char name[60];
-    uint32_t parent, existing;
-    if (kind == KIND_FILE && *path && path[strlen(path) - 1] == '/') {
-        errno = ENOTDIR;
-        return -1;
-    }
-    if (parent_name(fs, path, &parent, name) < 0)
-        return -1;
-    if (find(fs, parent, name, &existing) == 0) {
-        errno = EEXIST;
-        return -1;
-    }
-    if (errno != ENOENT)
-        return -1;
-    *id = inode_alloc(fs, kind, parent);
-    if (!*id)
-        return -1;
-    if (kind == KIND_DIR) {
-        unsigned char empty[DIR_COUNT * 64] = {0};
-        if (file_write(fs, *id, empty, sizeof empty) < 0)
-            return -1;
-    }
-    return dir_add(fs, parent, name, *id);
-}
-
 /* Reconstruction du chemin courant en remontant les repertoires parents. */
 static int print_path(Sgf *fs, Output *o) {
     char path[COMMAND_MAX];
@@ -296,6 +130,39 @@ static int print_path(Sgf *fs, Output *o) {
     return add_text(o, "\n");
 }
 
+/* Conversion d'une liste de lettres r, w, x en droits. */
+static int parse_rights(const char *text, size_t length) {
+    unsigned rights = 0;
+    for (size_t i = 0; i < length; ++i) {
+        unsigned bit;
+        if (text[i] == 'r') bit = ACCESS_READ;
+        else if (text[i] == 'w') bit = ACCESS_WRITE;
+        else if (text[i] == 'x') bit = ACCESS_EXEC;
+        else { errno = EINVAL; return -1; }
+        if (rights & bit) { errno = EINVAL; return -1; }
+        rights |= bit;
+    }
+    return (int)rights;
+}
+
+/* Affichage de deux categories de trois droits : utilisateur puis autres. */
+static void rights_text(const unsigned char *node, char text[8]) {
+    unsigned mode = disk_get(node + INODE_RIGHTS);
+    text[0] = disk_get(node) == KIND_DIR ? 'd' : '-';
+    for (unsigned i = 0; i < 6; ++i)
+        text[i + 1] = (mode & (1u << (5 - i))) ? "rwx"[i % 3] : '-';
+    text[7] = 0;
+}
+
+/* Conversion de la date stockee dans l'inode vers l'heure locale. */
+static void modification_date(const unsigned char *node, char text[32]) {
+    time_t stamp = (time_t)disk_get(node + INODE_MTIME);
+    struct tm local;
+    if (!stamp || !localtime_r(&stamp, &local) ||
+        !strftime(text, 32, "%d/%m/%Y %H:%M", &local))
+        strcpy(text, "inconnue");
+}
+
 /* On choisit le traitement selon la commande et son nombre d'arguments. */
 static int execute(Sgf *fs, int argc, char **v, int redirect, Output *o, int *dirty) {
     if (!argc)
@@ -305,6 +172,17 @@ static int execute(Sgf *fs, int argc, char **v, int redirect, Output *o, int *di
     if (redirect >= 0 && strcmp(cmd, "echo")) {
         errno = EINVAL;
         return -1;
+    }
+
+    /* chmod ne gere que l'utilisateur proprietaire et les autres. */
+    if (!strcmp(cmd, "chmod") && argc == 3) {
+        const char *separator = strstr(v[1], ",o=");
+        if (strncmp(v[1], "u=", 2) || !separator) { errno = EINVAL; return -1; }
+        int user = parse_rights(v[1] + 2, (size_t)(separator - (v[1] + 2)));
+        int others = parse_rights(separator + 3, strlen(separator + 3));
+        if (user < 0 || others < 0) return -1;
+        *dirty = 1;
+        return sgf_chmod(fs, v[2], (unsigned)user, (unsigned)others);
     }
 
     /* pwd affiche le chemin absolu du repertoire courant du disque virtuel. */
@@ -319,6 +197,8 @@ static int execute(Sgf *fs, int argc, char **v, int redirect, Output *o, int *di
             errno = ENOTDIR;
             return -1;
         }
+        if (inode_access(fs, id, ACCESS_EXEC) < 0)
+            return -1;
         fs->cwd = id;
         return 0;
     }
@@ -337,7 +217,7 @@ static int execute(Sgf *fs, int argc, char **v, int redirect, Output *o, int *di
         return add_text(o, text);
     }
 
-    /* ls -l ajoute le type, l'inode et la taille aux noms du repertoire. */
+    /* ls affiche les noms ; l'option -l ajoute les informations des inodes. */
     if (!strcmp(cmd, "ls")) {
         int detailed = argc >= 2 && !strcmp(v[1], "-l");
         int path_index = detailed ? 2 : 1;
@@ -349,24 +229,34 @@ static int execute(Sgf *fs, int argc, char **v, int redirect, Output *o, int *di
         if (resolve(fs, argc > path_index ? v[path_index] : ".", &id) < 0)
             return -1;
         unsigned char entries[DIR_COUNT * 64];
+        if (inode_access(fs, id, ACCESS_READ | ACCESS_EXEC) < 0)
+            return -1;
         if (directory(fs, id, entries) < 0)
             return -1;
+        char text[200];
+        if (detailed) {
+            snprintf(text, sizeof text, "%-7s %-6s %-5s %9s %-16s %s\n",
+                     "Droits", "UID", "Inode", "Taille(o)", "Date/heure", "Nom");
+            if (add_text(o, text) < 0) return -1;
+        }
         for (unsigned i = 0; i < DIR_COUNT; ++i) {
             uint32_t child = disk_get(entries + i * 64);
             if (!child)
                 continue;
             unsigned char *node = inode(fs, child);
-            char text[160];
+            const char *name = (char *)entries + i * 64 + 4;
+            const char *suffix = disk_get(node) == KIND_DIR ? "/" : "";
             if (detailed) {
-                snprintf(text, sizeof text, "%c inode=%u taille=%u octets ",
-                         disk_get(node) == KIND_DIR ? 'd' : '-', child, disk_get(node + 4));
-                if (add_text(o, text) < 0)
-                    return -1;
+                char rights[8], date[32];
+                rights_text(node, rights);
+                modification_date(node, date);
+                snprintf(text, sizeof text, "%-7s %-6u %-5u %9u %-16s %s%s\n",
+                         rights, disk_get(node + INODE_OWNER), child, disk_get(node + 4),
+                         date, name, suffix);
+            } else {
+                snprintf(text, sizeof text, "%s%s\n", name, suffix);
             }
-            snprintf(text, sizeof text, "%s%s\n", entries + i * 64 + 4,
-                     disk_get(node) == KIND_DIR ? "/" : "");
-            if (add_text(o, text) < 0)
-                return -1;
+            if (add_text(o, text) < 0) return -1;
         }
         return 0;
     }
@@ -374,40 +264,26 @@ static int execute(Sgf *fs, int argc, char **v, int redirect, Output *o, int *di
     /* mkdir cree un repertoire vide. */
     if (!strcmp(cmd, "mkdir") && argc == 2) {
         *dirty = 1;
-        return create_node(fs, v[1], KIND_DIR, &id);
+        return _mkdir(fs, v[1]);
     }
 
-    /* cat recupere le contenu texte du fichier. */
+    /* cat ouvre le fichier, lit son contenu, puis le ferme. */
     if (!strcmp(cmd, "cat") && argc == 2) {
-        if (resolve(fs, v[1], &id) < 0)
-            return -1;
-        if (disk_get(inode(fs, id)) != KIND_FILE) {
-            errno = EISDIR;
-            return -1;
-        }
-        size_t len = disk_get(inode(fs, id) + 4);
+        int file = _myopen(fs, v[1], SGF_READ);
+        if (file < 0) return -1;
         unsigned char data[FILE_MAX + 1];
-        if (file_read(fs, id, data, FILE_MAX) < 0)
-            return -1;
-        if (memchr(data, 0, len)) {
-            errno = EILSEQ;
-            return -1;
-        }
-        data[len] = 0;
+        int length = _myread(fs, file, data, FILE_MAX);
+        int saved = errno;
+        _myclose(fs, file);
+        if (length < 0) { errno = saved; return -1; }
+        if (memchr(data, 0, (size_t)length)) { errno = EILSEQ; return -1; }
+        data[length] = 0;
         return add_text(o, (char *)data);
     }
 
-    /* echo "texte" > fichier cree le fichier ou remplace son contenu. */
+    /* echo cree ou vide le fichier avant d'y ecrire son texte. */
     if (!strcmp(cmd, "echo") && argc == 4 && redirect == 2) {
         *dirty = 1;
-        if (resolve(fs, v[3], &id) < 0) {
-            if (errno != ENOENT || create_node(fs, v[3], KIND_FILE, &id) < 0)
-                return -1;
-        }
-        if (disk_get(inode(fs, id)) != KIND_FILE) {
-            errno = EISDIR;
-            return -1;
-        }
         unsigned char data[COMMAND_MAX];
         size_t length = strlen(v[1]);
         if (length + 1 > sizeof data || length + 1 > FILE_MAX) {
@@ -416,45 +292,23 @@ static int execute(Sgf *fs, int argc, char **v, int redirect, Output *o, int *di
         }
         memcpy(data, v[1], length);
         data[length] = '\n';
-        return file_write(fs, id, data, length + 1);
+        int file = _mycreat(fs, v[3], SGF_WRITE);
+        if (file < 0) return -1;
+        int result = _mywrite(fs, file, data, length + 1);
+        int saved = errno;
+        _myclose(fs, file);
+        if (result < 0) { errno = saved; return -1; }
+        return 0;
     }
 
-    /* On refuse de supprimer un repertoire non vide ou utilise par le chemin courant. */
-    if ((!strcmp(cmd, "rm") || !strcmp(cmd, "rmdir")) && argc == 2) {
+    /* Les primitives du SGF controlent le type et le contenu avant suppression. */
+    if (!strcmp(cmd, "rm") && argc == 2) {
         *dirty = 1;
-        char name[60];
-        uint32_t parent;
-        if (resolve(fs, v[1], &id) < 0 || parent_name(fs, v[1], &parent, name) < 0)
-            return -1;
-        uint32_t kind = disk_get(inode(fs, id));
-        if (!strcmp(cmd, "rm") && kind == KIND_DIR) {
-            errno = EISDIR;
-            return -1;
-        }
-        if (!strcmp(cmd, "rmdir")) {
-            unsigned char entries[DIR_COUNT * 64];
-            if (directory(fs, id, entries) < 0)
-                return -1;
-            for (unsigned i = 0; i < DIR_COUNT; ++i)
-                if (disk_get(entries + i * 64)) {
-                    errno = ENOTEMPTY;
-                    return -1;
-                }
-            uint32_t p = fs->cwd;
-            for (;;) {
-                if (p == id) {
-                    errno = EBUSY;
-                    return -1;
-                }
-                if (!p)
-                    break;
-                p = disk_get(inode(fs, p) + 8);
-            }
-        }
-        if (dir_remove(fs, parent, name) < 0)
-            return -1;
-        inode_free(fs, id);
-        return 0;
+        return _unlink(fs, v[1]);
+    }
+    if (!strcmp(cmd, "rmdir") && argc == 2) {
+        *dirty = 1;
+        return _rmdir(fs, v[1]);
     }
 
     /* cp et mv refusent d'ecraser un nom deja present. */
@@ -465,6 +319,9 @@ static int execute(Sgf *fs, int argc, char **v, int redirect, Output *o, int *di
         if (resolve(fs, v[1], &id) < 0 || parent_name(fs, v[1], &oldparent, oldname) < 0 ||
             parent_name(fs, v[2], &parent, name) < 0)
             return -1;
+        if (inode_access(fs, parent, ACCESS_WRITE | ACCESS_EXEC) < 0 ||
+            (!strcmp(cmd, "mv") && inode_access(fs, oldparent, ACCESS_WRITE | ACCESS_EXEC) < 0))
+            return -1;
         if (find(fs, parent, name, &other) == 0) {
             errno = EEXIST;
             return -1;
@@ -472,16 +329,20 @@ static int execute(Sgf *fs, int argc, char **v, int redirect, Output *o, int *di
         if (errno != ENOENT)
             return -1;
         if (!strcmp(cmd, "cp")) {
-            if (disk_get(inode(fs, id)) != KIND_FILE) {
-                errno = EISDIR;
-                return -1;
-            }
+            int source = _myopen(fs, v[1], SGF_READ);
+            if (source < 0) return -1;
             unsigned char data[FILE_MAX];
-            size_t len = disk_get(inode(fs, id) + 4);
-            if (file_read(fs, id, data, sizeof data) < 0 ||
-                create_node(fs, v[2], KIND_FILE, &other) < 0)
-                return -1;
-            return file_write(fs, other, data, len);
+            int length = _myread(fs, source, data, sizeof data);
+            int saved = errno;
+            _myclose(fs, source);
+            if (length < 0) { errno = saved; return -1; }
+            int destination = _mycreat(fs, v[2], SGF_WRITE);
+            if (destination < 0) return -1;
+            int result = _mywrite(fs, destination, data, (size_t)length);
+            saved = errno;
+            _myclose(fs, destination);
+            if (result < 0) { errno = saved; return -1; }
+            return 0;
         }
         uint32_t p = parent;
         for (;;) {
@@ -527,19 +388,27 @@ int sgf_execute(Sgf *fs, const char *command, char *output, size_t capacity) {
     }
     memcpy(backup, fs->image, IMAGE_SIZE);
     uint32_t cwd = fs->cwd;
+    int modes[INODE_COUNT];
+    size_t positions[INODE_COUNT];
+    memcpy(modes, fs->open_mode, sizeof modes);
+    memcpy(positions, fs->position, sizeof positions);
     Output o = {output, capacity, 0};
     int dirty = 0;
+    fs->in_command = 1;
     int result = execute(fs, argc, args, redirect, &o, &dirty);
 
     /* On sauvegarde seulement si la commande a modifie le disque. */
     if (result == 0 && dirty)
         result = disk_save(fs);
+    fs->in_command = 0;
     if (result < 0) {
 
         /* En cas d'erreur, on remet le disque et le repertoire courant comme avant. */
         int saved = errno;
         memcpy(fs->image, backup, IMAGE_SIZE);
         fs->cwd = cwd;
+        memcpy(fs->open_mode, modes, sizeof modes);
+        memcpy(fs->position, positions, sizeof positions);
         snprintf(output, capacity, "Erreur : %s\n", strerror(saved));
         errno = saved;
     }

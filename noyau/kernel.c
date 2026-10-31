@@ -7,9 +7,9 @@
 #include <stdlib.h>
 
 /* On ouvre le disque, puis on traite les commandes jusqu'a la fin de session. */
-int kernel_run(int requests, int responses, const char *disk, int create) {
+int kernel_run(int requests, int responses, const char *disk, int create, unsigned user_id) {
     char error[512];
-    Sgf *fs = sgf_open(disk, create, error, sizeof error);
+    Sgf *fs = sgf_open_user(disk, create, error, sizeof error, user_id);
     if (!fs) {
         frame_send(responses, error, 1);
         return 1;

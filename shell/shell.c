@@ -5,6 +5,7 @@
 #include "kernel.h"
 #include "protocol.h"
 #include <errno.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +25,7 @@ static void stop(int sig) {
 int main(int argc, char **argv) {
     const char *disk = "disque.dat";
     int create = 0;
+    unsigned user_id = (unsigned)getuid();
     key_t key = display_default_key();
 
     /* On lit les options donnees au lancement du Shell. */
@@ -32,8 +34,18 @@ int main(int argc, char **argv) {
             create = 1;
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc)
             disk = argv[++i];
-        else {
-            fprintf(stderr, "Usage : %s [--disk fichier.dat] [--format]\n", argv[0]);
+        else if (!strcmp(argv[i], "--user") && i + 1 < argc) {
+            const char *text = argv[++i];
+            char *end;
+            errno = 0;
+            unsigned long value = strtoul(text, &end, 10);
+            if (!*text || *text == '-' || *end || errno || value > UINT_MAX) {
+                fprintf(stderr, "Identifiant utilisateur invalide\n");
+                return 2;
+            }
+            user_id = (unsigned)value;
+        } else {
+            fprintf(stderr, "Usage : %s [--disk fichier.dat] [--format] [--user uid]\n", argv[0]);
             return 2;
         }
     }
@@ -68,7 +80,7 @@ int main(int argc, char **argv) {
         signal(SIGTERM, SIG_DFL);
         close(request[1]);
         close(response[0]);
-        int r = kernel_run(request[0], response[1], disk, create);
+        int r = kernel_run(request[0], response[1], disk, create, user_id);
         close(request[0]);
         close(response[1]);
         _exit(r);

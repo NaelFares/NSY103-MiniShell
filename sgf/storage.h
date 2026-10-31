@@ -27,11 +27,25 @@
 #define KIND_FILE 1u
 #define KIND_DIR 2u
 
+/* Champs reserves de l'inode : proprietaire et droits utilisateur/autres. */
+#define INODE_OWNER 48u
+#define INODE_RIGHTS 52u
+#define INODE_MTIME 56u
+#define ACCESS_READ 4u
+#define ACCESS_WRITE 2u
+#define ACCESS_EXEC 1u
+#define FILE_RIGHTS 064u
+#define DIR_RIGHTS 075u
+
 /* Etat du disque pendant la session : contenu en memoire, fichier et repertoire courant. */
 struct Sgf {
     unsigned char *image;
     FILE *file;
     uint32_t cwd;
+    unsigned user_id;
+    int open_mode[INODE_COUNT];
+    size_t position[INODE_COUNT];
+    int in_command;
 };
 
 /* Fonctions internes partagees entre le stockage et les commandes. */
@@ -43,5 +57,14 @@ void inode_free(Sgf *fs, uint32_t id);
 int file_read(Sgf *fs, uint32_t id, unsigned char *out, size_t capacity);
 int file_write(Sgf *fs, uint32_t id, const unsigned char *data, size_t size);
 int disk_save(Sgf *fs);
+
+/* Outils internes de parcours et de modification des repertoires. */
+int inode_access(Sgf *fs, uint32_t id, unsigned rights);
+int directory(Sgf *fs, uint32_t id, unsigned char *data);
+int find(Sgf *fs, uint32_t dir, const char *name, uint32_t *id);
+int resolve(Sgf *fs, const char *path, uint32_t *id);
+int parent_name(Sgf *fs, const char *path, uint32_t *parent, char *name);
+int dir_add(Sgf *fs, uint32_t dir, const char *name, uint32_t child);
+int dir_remove(Sgf *fs, uint32_t dir, const char *name);
 
 #endif

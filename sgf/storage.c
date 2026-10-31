@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 
 /* On lit un entier de quatre octets dans l'image du disque. */
 uint32_t disk_get(const unsigned char *p) {
@@ -42,6 +43,12 @@ unsigned char *inode(Sgf *fs, uint32_t id) {
     return fs->image + TABLE_I + id * INODE_SIZE;
 }
 
+/* Date de derniere modification du contenu, en secondes depuis 1970. */
+static void update_time(Sgf *fs, uint32_t id) {
+    time_t now = time(NULL);
+    disk_put(inode(fs, id) + INODE_MTIME, now == (time_t)-1 ? 0 : (uint32_t)now);
+}
+
 /* On retrouve le debut d'un bloc de donnees. */
 static unsigned char *block(Sgf *fs, uint32_t id) {
     return fs->image + DATA_START + id * BLOCK_SIZE;
@@ -67,6 +74,9 @@ uint32_t inode_alloc(Sgf *fs, uint32_t kind, uint32_t parent) {
             memset(inode(fs, i), 0, INODE_SIZE);
             disk_put(inode(fs, i), kind);
             disk_put(inode(fs, i) + 8, parent);
+            disk_put(inode(fs, i) + INODE_OWNER, fs->user_id);
+            disk_put(inode(fs, i) + INODE_RIGHTS, kind == KIND_DIR ? DIR_RIGHTS : FILE_RIGHTS);
+            update_time(fs, i);
             return i;
         }
     errno = ENOSPC;
@@ -176,6 +186,7 @@ int file_write(Sgf *fs, uint32_t id, const unsigned char *data, size_t size) {
             memset(dest + n, 0, BLOCK_SIZE - n);
     }
     disk_put(node + 4, (uint32_t)size);
+    update_time(fs, id);
     return 0;
 }
 
@@ -194,7 +205,7 @@ static int validate(Sgf *fs) {
     if (memcmp(im, "MDOSv001", 8) || disk_get(im + 8) != BLOCK_SIZE ||
         disk_get(im + 12) != BLOCK_COUNT || disk_get(im + 16) != INODE_COUNT ||
         disk_get(im + 20) != MAP_I || disk_get(im + 24) != MAP_B || disk_get(im + 28) != TABLE_I ||
-        disk_get(im + 32) != DATA_START)
+        disk_get(im + 32) != DATA_START || disk_get(im + 36) != 1)
         return -1;
     if (!bit(im + MAP_I, 0) || !bit(im + MAP_B, 0) || disk_get(inode(fs, 0)) != KIND_DIR ||
         disk_get(inode(fs, 0) + 8) != 0)
@@ -207,6 +218,7 @@ static int validate(Sgf *fs) {
             uint32_t kind = disk_get(node), size = disk_get(node + 4);
             uint32_t parent = disk_get(node + 8);
             if ((kind != KIND_FILE && kind != KIND_DIR) || size > FILE_MAX ||
+                disk_get(node + INODE_RIGHTS) > 077u ||
                 (kind == KIND_DIR && size != DIR_COUNT * 64) || parent >= INODE_COUNT ||
                 !bit(im + MAP_I, parent) || disk_get(inode(fs, parent)) != KIND_DIR)
                 return -1;
@@ -272,13 +284,14 @@ static int validate(Sgf *fs) {
 }
 
 /* Creation ou chargement de l'image du disque en memoire. */
-Sgf *sgf_open(const char *path, int create, char *error, size_t capacity) {
+Sgf *sgf_open_user(const char *path, int create, char *error, size_t capacity, unsigned user_id) {
     Sgf *fs = calloc(1, sizeof *fs);
     int created = 0;
     if (!fs) {
         snprintf(error, capacity, "Memoire insuffisante");
         return NULL;
     }
+    fs->user_id = user_id;
     fs->image = calloc(1, IMAGE_SIZE);
     if (!fs->image)
         goto fail;
@@ -300,17 +313,38 @@ Sgf *sgf_open(const char *path, int create, char *error, size_t capacity) {
             disk_put(fs->image + 8 + i * 4, fields[i]);
         mark(fs->image + MAP_I, 0, 1);
         mark(fs->image + MAP_B, 0, 1);
+        disk_put(fs->image + 36, 1);
         disk_put(inode(fs, 0), KIND_DIR);
+        disk_put(inode(fs, 0) + INODE_OWNER, fs->user_id);
+        disk_put(inode(fs, 0) + INODE_RIGHTS, DIR_RIGHTS);
         unsigned char empty[DIR_COUNT * 64] = {0};
         if (file_write(fs, 0, empty, sizeof empty) < 0 || disk_save(fs) < 0)
             goto fail;
     } else {
         if (fseek(fs->file, 0, SEEK_END) != 0 || ftell(fs->file) != IMAGE_SIZE ||
             fseek(fs->file, 0, SEEK_SET) != 0 ||
-            fread(fs->image, 1, IMAGE_SIZE, fs->file) != IMAGE_SIZE || validate(fs) < 0) {
+            fread(fs->image, 1, IMAGE_SIZE, fs->file) != IMAGE_SIZE) {
             errno = EINVAL;
             goto fail;
         }
+        /* Les anciens disques n'avaient pas de proprietaire ni de droits. */
+        int migrated = disk_get(fs->image + 36) == 0;
+        if (migrated) {
+            for (uint32_t id = 0; id < INODE_COUNT; ++id)
+                if (bit(fs->image + MAP_I, id)) {
+                    uint32_t kind = disk_get(inode(fs, id));
+                    disk_put(inode(fs, id) + INODE_OWNER, fs->user_id);
+                    disk_put(inode(fs, id) + INODE_RIGHTS,
+                             kind == KIND_DIR ? DIR_RIGHTS : FILE_RIGHTS);
+                }
+            disk_put(fs->image + 36, 1);
+        }
+        if (validate(fs) < 0) {
+            errno = EINVAL;
+            goto fail;
+        }
+        if (migrated && disk_save(fs) < 0)
+            goto fail;
     }
     return fs;
 fail:
@@ -323,6 +357,26 @@ fail:
         errno = saved;
         return NULL;
     }
+}
+
+/* Par defaut, l'identite virtuelle est celle du compte Linux courant. */
+Sgf *sgf_open(const char *path, int create, char *error, size_t capacity) {
+    return sgf_open_user(path, create, error, capacity, (unsigned)getuid());
+}
+
+/* On sauvegarde avant de fermer les ouvertures et de changer d'identite. */
+int sgf_set_user(Sgf *fs, unsigned user_id) {
+    for (unsigned id = 1; id < INODE_COUNT; ++id)
+        if (fs->open_mode[id] & SGF_WRITE) {
+            if (disk_save(fs) < 0)
+                return -1;
+            break;
+        }
+    fs->user_id = user_id;
+    fs->cwd = 0;
+    memset(fs->open_mode, 0, sizeof fs->open_mode);
+    memset(fs->position, 0, sizeof fs->position);
+    return 0;
 }
 
 /* Liberation de la memoire et fermeture du fichier de donnees. */
